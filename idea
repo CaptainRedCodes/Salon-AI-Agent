@@ -1,0 +1,39 @@
+1. AI Agent Setup (First Step) - *** COMPLETED ***
+    ● Set up a basic simulated AI agent using LiveKit (you can use their Python SDK or
+    another language you prefer).
+    ○ Why LiveKit? We are evaluating your ability to research an unfamiliar framework,
+    read documentation, and debug in a foreign environment.
+    ● Prompt it with basic business information about a fake salon.
+    ○ Why LiveKit? We want to evaluate your ability to build good prompts.
+    ● The agent doesn't need full conversational handling. You can just use a sample app and
+    wrap up this step quickly. You just need to equip your agent with the ability to:
+    ○ Receive a call
+    ○ Respond if it knows the answer
+    ○ Trigger a "request help" event if it doesn't know
+
+2. Human Request Handling
+When the AI doesn't know something:
+    ● Tell the caller: "Let me check with my supervisor and get back to you."
+    ● Create a pending help request.
+    ○ You decide how this request is structured in a DB— we will evaluate the
+    elegance of your solution. You can use a lightweight DB like DynamoDB/Firebase
+    to move fast.
+
+    ● Simulate texting the supervisor:
+    ○ E.g., log a console message, or trigger a webhook.
+
+    ○ Content: “Hey, I need help answering [question].”
+
+3. Supervisor Response Handling
+    ● Build a simple UI where a human can:
+    ○ View pending requests
+    ○ Submit answers to pending requests
+    ○ See history of resolved/unresolved requests
+    ● When the supervisor responds:
+    ○ AI should immediately text back the original caller (simulated via webhook or
+    console log).
+    ○ AI should update its internal knowledge base with the new information.
+
+4. Knowledge Base Updates
+    ● Implement a basic system where learned answers are saved.
+    ● Include a simple view like a “Learned Answers” section.
