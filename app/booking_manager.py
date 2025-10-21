@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import logging
 from typing import Any, Dict, List
 
-from db import FirebaseManager
+from app.db import FirebaseManager
 
 
 logging.basicConfig(
@@ -37,8 +37,6 @@ class BookingManager:
             loop = asyncio.get_event_loop()
             
             def _create():
-                # Generate confirmation number using timestamp-based approach
-                # This is more reliable than counting documents
                 timestamp_part = int(timestamp.timestamp() * 1000) % 100000
                 confirmation_number = f"SA{timestamp_part}"
                 

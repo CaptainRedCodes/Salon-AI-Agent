@@ -1,0 +1,14 @@
+{
+  "name": "Super Unisex Salon",
+  "address": "1st Floor, Phoenix Mall, Bengaluru",
+  "contact": "+91 9999999999",
+  "working_hours": {
+    "Monday": "9AM - 7PM",
+    "Tuesday": "9AM - 7PM",
+    "Wednesday": "9AM - 7PM",
+    "Thursday": "Holiday",
+    "Friday": "9AM - 7PM",
+    "Saturday": "9AM - 7PM",
+    "Sunday": "9AM - 7PM"
+  }
+}
