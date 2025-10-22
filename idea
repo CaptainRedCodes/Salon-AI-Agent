@@ -40,14 +40,9 @@ When the AI doesn't know something:
 
 
 
- NOTE: SWITCH TO DEEPGRAM FOR STT ,Enable streaming properly - Make sure you're using streaming STT, not batch processing
- MAKE PROMPTING BETTER
-
- Implement conversation trimming - Keep only last 10-15 messages in context, drop older ones
-Use Firebase connection pooling properly - Reuse connections, don't create new ones each time
-Add caching - Cache FAQ/knowledge base searches so you're not hitting them repeatedly
-Monitor token usage - Log your UsageCollector more frequently to spot when you're hitting limits
-Optimize Firebase queries - Use .select() to only fetch needed fields, not entire documents
-Add response time logging - Track how long each tool call takes to identify bottlenecks
-Clear completed tool results from context to prevent bloat
-Consider using max_context_length parameter to hard-limit conversation history
+ NOTE:  SWITCH TO DEEPGRAM FOR STT ,Enable streaming properly - Make sure you're using streaming STT, not batch processing
+        Implement conversation trimming - Keep only last 10-15 messages in context, drop older ones
+        Use Firebase connection pooling properly - Reuse connections, don't create new ones each time
+        Monitor token usage - Log your UsageCollector more frequently to spot when you're hitting limits
+        Clear completed tool results from context to prevent bloat
+        Consider using max_context_length parameter to hard-limit conversation history

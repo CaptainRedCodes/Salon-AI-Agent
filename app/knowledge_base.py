@@ -1,17 +1,17 @@
-from datetime import datetime
 import asyncio
 import uuid
-import json
-from qdrant_client import QdrantClient, models
+from qdrant_client import models
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from sentence_transformers import SentenceTransformer
 import os
-from pathlib import Path
 
-FIREBASE_HELP_LOGS = "help_logs"
-QDRANT_COLLECTION = "knowledge_base"
-REFRESH_INTERVAL = 18000  # seconds 
-FAQ_FILE_PATH = os.path.join(os.path.dirname(__file__), "json", "faq.json")
+from app.config.settings import knowledge_settings
+from app.information import SALON_FAQ
+
+FIREBASE_HELP_LOGS = knowledge_settings.logs_collection
+QDRANT_COLLECTION = knowledge_settings.qdrant_collection
+REFRESH_INTERVAL =  knowledge_settings.refresh_interval
+FAQ = SALON_FAQ
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 QDRANT_URL = os.getenv("QDRANT_URL")
 
@@ -20,7 +20,7 @@ class KnowledgeManager:
         self.collection_name = QDRANT_COLLECTION
         self.faq_cache = []
         self.last_updated = None
-        self.faq_file_path = FAQ_FILE_PATH
+        self.faq = FAQ
 
         # Async Qdrant client
         self.qdrant = AsyncQdrantClient(
@@ -28,44 +28,19 @@ class KnowledgeManager:
             api_key=QDRANT_API_KEY
         )
 
-        # Lightweight embedding model with local cache
-        self.encoder = SentenceTransformer("paraphrase-MiniLM-L3-v2", cache_folder="./models")
+        # Lightweight embedding model
+        self.encoder = SentenceTransformer("paraphrase-MiniLM-L3-v2", cache_folder="./sentence_models")
 
     async def initialize(self):
         """Initialize Qdrant collection - call this after creating the instance."""
+        self.faq_cache = self.faq.copy()
         await self._init_qdrant_collection()
+        await self._sync_faqs_to_qdrant()
 
     async def _run_in_executor(self, func, *args):
         """Run CPU-intensive operations in executor."""
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, func, *args)
-
-    async def load_faq(self):
-        """Load FAQ data from local JSON file and sync to Qdrant."""
-        def _load_file():
-            try:
-                with open(self.faq_file_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    if isinstance(data, list):
-                        return data
-                    else:
-                        print(f"[Warning] FAQ JSON is not a list: {self.faq_file_path}")
-                        return []
-            except FileNotFoundError:
-                print(f"[Error] FAQ file not found: {self.faq_file_path}")
-                return []
-            except json.JSONDecodeError as e:
-                print(f"[Error] Failed to parse JSON {self.faq_file_path}: {e}")
-                return []
-
-        # Load FAQs in a thread pool to avoid blocking
-        self.faq_cache = await self._run_in_executor(_load_file)
-        self.last_updated = datetime.now()
-
-        # Sync to Qdrant (async)
-        await self._sync_faqs_to_qdrant()
-
-        print(f"Loaded {len(self.faq_cache)} FAQs from {self.faq_file_path}")
 
     async def _sync_faqs_to_qdrant(self):
         """Sync all cached FAQs to Qdrant vector store."""

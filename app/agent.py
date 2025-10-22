@@ -1,7 +1,3 @@
-
-from dataclasses import dataclass, field
-import os
-from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 from livekit.agents import (
     Agent,
@@ -14,8 +10,10 @@ import logging
 
 from app.knowledge_base import KnowledgeManager
 from app.booking_manager import BookingManager
-from app.helper import HelpRequestManager
-from app.model import SalonUserData
+from app.help_request import HelpRequestManager
+from app.models.booking import  BookingCreate, BookingUpdate 
+from app.models.help_request import HelpRequestCreate
+from app.models.salon_model import SalonUserData,AvailabilityCheckPayload
 from app.information import SALON_INFO,SALON_SERVICES,INSTRUCTIONS
 import asyncio
 
@@ -74,115 +72,78 @@ class Assistant(Agent):
             }
 
         return f"The current date and time is {human_readable}"
-
     @function_tool
     async def update_booking_context(
         self,
         context: RunContext[SalonUserData],
-        customer_name: Optional[str] = None,
-        phone_number: Optional[str] = None,
-        service: Optional[str] = None,
-        appointment_date: Optional[str] = None,
-        appointment_time: Optional[str] = None
+        request: BookingUpdate
     ) -> str:
         """
-        Update the booking context with customer information.
-        Call this whenever you collect a piece of booking information.
-        
-        Args:
-            customer_name: Customer's full name
-            phone_number: Customer's 10-digit phone number
-            service: Service name (must match available services)
-            appointment_date: Date for appointment
-            appointment_time: Time for appointment
+        Update the booking context with customer information using a payload model.
         """
+        booking = context.userdata.current_booking
+        updated_fields = []
+
         try:
-            booking = context.userdata.current_booking
-            updated_fields = []
-            
-            # Update provided fields
-            if customer_name:
-                booking.customer_name = customer_name
+            # Update name
+            if request.customer_name:
+                booking.customer_name = request.customer_name
                 updated_fields.append("name")
-            
-            if phone_number:
-                # Validate phone number
-                clean_phone = ''.join(filter(str.isdigit, phone_number))
-                if len(clean_phone) != 10:
-                    context.userdata.validation_errors.append(
-                        f"Invalid phone number: {phone_number} (must be 10 digits)"
-                    )
-                    return "Phone number must be exactly 10 digits. Please provide a valid 10-digit phone number."
+
+            # Update phone number
+            if request.phone_number:
+                clean_phone = ''.join(filter(str.isdigit, request.phone_number))
                 booking.phone_number = clean_phone
                 updated_fields.append("phone")
-            
-            if service:
-                service_lower = service.lower()
+
+            # Update service
+            if request.service:
+                service_lower = request.service.lower()
                 if service_lower in self.service_prices:
-                    booking.service = service
+                    booking.service = request.service
                     booking.price = self.service_prices[service_lower]
                     updated_fields.append("service")
                 else:
                     available_services = ", ".join([s.title() for s in self.service_prices.keys()])
-                    return f"'{service}' is not available. Our services are: {available_services}"
-            
-            if appointment_date:
-                # Check if Thursday
-                try:
-                    date_obj = datetime.strptime(appointment_date, "%B %d, %Y")
-                    if date_obj.strftime("%A") == "Thursday":
-                        return "We're closed on Thursdays. Please choose another day (we're open Monday-Wednesday and Friday-Sunday)."
-                except:
-                    pass  # If parsing fails, still store the date
-                
-                booking.appointment_date = appointment_date
+                    return f"'{request.service}' is not available. Our services are: {available_services}"
+
+            # Update date
+            if request.appointment_date:
+                booking.appointment_date = request.appointment_date
                 updated_fields.append("date")
-            
-            if appointment_time:
-                booking.appointment_time = appointment_time
+
+            # Update time
+            if request.appointment_time:
+                booking.appointment_time = request.appointment_time
                 updated_fields.append("time")
-            
+
             # Update context state
             context.userdata.last_tool_called = "update_booking_context"
             context.userdata.last_tool_result = updated_fields
-            
+
+            # Check completeness
             if booking.is_complete():
                 context.userdata.conversation_state = "ready_for_confirmation"
                 return f"Great! I've updated: {', '.join(updated_fields)}. I now have all your information. Let me summarize everything for you."
             else:
-                missing = []
-                if not booking.customer_name: missing.append("name")
-                if not booking.phone_number: missing.append("phone number")
-                if not booking.service: missing.append("service")
-                if not booking.appointment_date: missing.append("date")
-                if not booking.appointment_time: missing.append("time")
-                
+                missing = [f for f in ["name","phone number","service","date","time"] 
+                        if getattr(booking, f.replace(" ", "_")) in (None, "")]
                 return f"I've updated: {', '.join(updated_fields)}. I still need: {', '.join(missing)}."
-        
+
         except Exception as e:
             logger.error(f"Context update failed: {e}")
             return "I had trouble saving that information. Could you repeat it?"
 
     @function_tool
     async def get_booking_summary(self, context: RunContext[SalonUserData]) -> str:
-        """
-        Get a summary of the current booking information collected so far.
-        Use this before asking for final confirmation.
-        """
         booking = context.userdata.current_booking
-        
         context.userdata.last_tool_called = "get_booking_summary"
-        
+
         if not booking.is_complete():
-            missing = []
-            if not booking.customer_name: missing.append("name")
-            if not booking.phone_number: missing.append("phone number")
-            if not booking.service: missing.append("service")
-            if not booking.appointment_date: missing.append("date")
-            if not booking.appointment_time: missing.append("time")
-            
+            missing = [f for f in ["name","phone number","service","date","time"] 
+                    if getattr(booking, f.replace(" ", "_")) in (None, "")]
             return f"Booking is incomplete. Still need: {', '.join(missing)}"
-        
+
         summary = (
             f"Here's what I have:\n"
             f"Name: {booking.customer_name}\n"
@@ -192,156 +153,127 @@ class Assistant(Agent):
             f"Time: {booking.appointment_time}\n\n"
             f"Does everything look correct?"
         )
-        
+
         context.userdata.waiting_for_confirmation = True
         return summary
 
+
     @function_tool
     async def book_appointment(self, context: RunContext[SalonUserData]) -> str:
-        """
-        Book the appointment using information stored in context.
-        Only call this after customer has confirmed all details.
-        The booking information will be automatically pulled from the context.
-        """
-        try:
-            booking = context.userdata.current_booking
-            
-            if not booking.is_complete():
-                return "Cannot book - missing required information. Please provide all details first."
-            
-            if not context.userdata.waiting_for_confirmation:
-                return "Please let me summarize the booking details for confirmation first."
-            
-            if not booking.customer_name:
-                return "Cannot book - customer name is required."
-            if not booking.service:
-                return "Cannot book - service is required."
-            if not booking.phone_number:
-                return "Cannot book - phone number is required."
-            if not booking.appointment_date or not booking.appointment_time:
-                return "Cannot book - appointment date and time is required."
-            if not booking.price:
-                return "Cannot book - price is required."
-            
-            booking_obj = await self.booking_manager.create_booking(
-                customer_name=booking.customer_name,
-                phone_number=booking.phone_number,
-                service=booking.service,
-                appointment_date=booking.appointment_date,
-                appointment_time=booking.appointment_time,
-                price=booking.price,
-            )
-            
-            confirmation_number = booking_obj["confirmation_number"]
-            
-            # Update context
-            context.userdata.conversation_state = "completed"
-            context.userdata.last_tool_called = "book_appointment"
-            context.userdata.last_tool_result = confirmation_number
-            booking.confirmed = True
-            
-            result = (
-                f"Perfect! Your appointment is confirmed for {booking.service} "
-                f"on {booking.appointment_date} at {booking.appointment_time}. "
-                f"Your confirmation number is {confirmation_number}. "
-                f"We'll see you then!"
-            )
-            
-            # Reset for next booking
-            context.userdata.reset_booking()
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Booking failed: {e}")
-            context.userdata.retry_count += 1
-            return (
-                "I apologize, but I'm having trouble completing your booking right now. "
-                "Let me get assistance from my supervisor to help you with this."
-            )
+        booking = context.userdata.current_booking
+
+        if not booking.is_complete():
+            return "Cannot book - missing required information. Please provide all details first."
+        
+        if not context.userdata.waiting_for_confirmation:
+            return "Please let me summarize the booking details for confirmation first."
+
+        slot_available = await self.check_availability(
+            booking.appointment_date, booking.appointment_time
+        )
+        if not slot_available:
+            return f"Sorry, the slot {booking.appointment_time} on {booking.appointment_date} is fully booked. Please choose another time."
+
+        if not booking.customer_name:
+            raise ValueError("Error in customer name")
+        
+        if not booking.service:
+            raise ValueError("Error in service")
+        
+        if not booking.appointment_date or not booking.appointment_time:
+            raise ValueError("Error in Timing")
+        
+        if not booking.price:
+            raise ValueError("Error in pricing")
+        
+        payload = BookingCreate(
+            customer_name=booking.customer_name,
+            service=booking.service,
+            appointment_date=booking.appointment_date,
+            appointment_time=booking.appointment_time,
+            price=booking.price,
+            phone_number=booking.phone_number,
+        )
+        booking_obj = await self.booking_manager.create_booking(payload)
+
+        confirmation_number = booking_obj.confirmation_number
+
+        # Update context
+        context.userdata.conversation_state = "completed"
+        context.userdata.last_tool_called = "book_appointment"
+        context.userdata.last_tool_result = confirmation_number
+        booking.confirmed = True
+
+        result = (
+            f"Perfect! Your appointment is confirmed for {booking.service} "
+            f"on {booking.appointment_date} at {booking.appointment_time}. "
+            f"Your confirmation number is {confirmation_number}. "
+            f"We'll see you then!"
+        )
+
+        # Reset for next booking
+        context.userdata.reset_booking()
+
+        return result
 
     @function_tool
     async def check_availability(
-        self, 
-        context: RunContext[SalonUserData], 
-        date: str, 
-        time: str = ""
+        self,
+        context: RunContext[SalonUserData],
+        request: AvailabilityCheckPayload
     ) -> str:
         """
         Check slot availability for a given date and optionally time.
         Stores the check in context for reference.
-        
-        Args:
-            date: The date to check (e.g., "January 15, 2025")
-            time: Optional specific time to check (e.g., "2:00 PM")
         """
         try:
             MAX_BOOKINGS_PER_SLOT = 2
-            all_slots = [
-                "9:00 AM", "10:00 AM", "11:00 AM", 
-                "1:00 PM", "2:00 PM", "3:00 PM", "4:00 PM"
-            ]
-            
+            all_slots = ["9:00 AM", "10:00 AM", "11:00 AM", "1:00 PM", "2:00 PM", "3:00 PM", "4:00 PM"]
+
             # Track this check in context
             context.userdata.availability_checks.append({
-                "date": date,
-                "time": time,
+                "date": request.date,
+                "time": request.time or "",
                 "timestamp": datetime.now().isoformat()
             })
             context.userdata.last_tool_called = "check_availability"
 
-            if time:
-                if time not in all_slots:
-                    return f"{time} is outside our business hours. Available times on {date}: {', '.join(all_slots)}"
-                
-                count_query = self.booking_manager.db.collection("appointments")\
-                    .where("appointment_date", "==", date)\
-                    .where("appointment_time", "==", time)\
-                    .count()
-                
-                count_result = count_query.get()
-                slot_count = count_result[0].value if count_result else 0
+            # Fetch all bookings for the given date
+            bookings_ref = self.booking_manager.db.collection("appointments")\
+                .where("appointment_date", "==", request.date)
+            bookings = bookings_ref.stream()
+            
+            slot_counts: dict[str, int] = {slot: 0 for slot in all_slots}
+            for doc in bookings:
+                data = doc.to_dict()
+                slot_time = data.get("appointment_time")
+                if slot_time in slot_counts:
+                    slot_counts[slot_time] += 1
 
-                if slot_count < MAX_BOOKINGS_PER_SLOT:
+            # Helper: find available slots
+            available_slots = [slot for slot, count in slot_counts.items() if count < MAX_BOOKINGS_PER_SLOT]
+
+            if request.time:
+                # Check specific time
+                if request.time not in all_slots:
+                    return f"{request.time} is outside our business hours. Available times: {', '.join(all_slots)}"
+                
+                if slot_counts.get(request.time, 0) < MAX_BOOKINGS_PER_SLOT:
                     context.userdata.last_tool_result = "available"
-                    return f"{time} on {date} is available."
+                    return f"{request.time} on {request.date} is available."
                 else:
-                    # Find alternatives
-                    available_slots = []
-                    for slot in all_slots:
-                        c_q = self.booking_manager.db.collection("appointments")\
-                            .where("appointment_date", "==", date)\
-                            .where("appointment_time", "==", slot)\
-                            .count()
-                        c_r = c_q.get()
-                        if c_r[0].value < MAX_BOOKINGS_PER_SLOT:
-                            available_slots.append(slot)
-
-                    context.userdata.last_tool_result = {"booked": time, "alternatives": available_slots}
-                    
+                    context.userdata.last_tool_result = {"booked": request.time, "alternatives": available_slots}
                     if available_slots:
-                        return f"{time} is fully booked. Available slots on {date}: {', '.join(available_slots)}"
+                        return f"{request.time} is fully booked. Available slots on {request.date}: {', '.join(available_slots)}"
                     else:
-                        return f"All slots on {date} are fully booked."
+                        return f"All slots on {request.date} are fully booked."
             else:
-                # Check all slots for the date
-                available_slots = []
-                for slot in all_slots:
-                    c_q = self.booking_manager.db.collection("appointments")\
-                        .where("appointment_date", "==", date)\
-                        .where("appointment_time", "==", slot)\
-                        .count()
-                    c_r = c_q.get()
-                    if c_r[0].value < MAX_BOOKINGS_PER_SLOT:
-                        available_slots.append(slot)
-
                 context.userdata.last_tool_result = available_slots
-
                 if available_slots:
                     slots_formatted = "\n".join(f"• {t}" for t in available_slots)
-                    return f"Available times on {date}:\n{slots_formatted}"
+                    return f"Available times on {request.date}:\n{slots_formatted}"
                 else:
-                    return f"Unfortunately, we're fully booked on {date}. Would you like to check another date?"
+                    return f"Unfortunately, we're fully booked on {request.date}. Would you like to check another date?"
 
         except Exception as e:
             logger.error(f"Availability check failed: {e}")
@@ -349,9 +281,9 @@ class Assistant(Agent):
 
     @function_tool
     async def request_help(
-        self, 
+        self,
         context: RunContext[SalonUserData],
-        question: str
+        request: HelpRequestCreate
     ) -> str:
         """
         Request human assistance for questions not covered in FAQ/knowledge base.
@@ -360,7 +292,7 @@ class Assistant(Agent):
         Args:
             question: Customer's legitimate query
         """
-        question = question.strip()
+        question = request.question.strip()
         
         # Track in context
         context.userdata.add_query(question)
@@ -370,8 +302,6 @@ class Assistant(Agent):
         
         try:
             question_lower = question.lower()
-            
-            # Check FAQ first
             try:
                 faq_results = await self.knowledge_base.search_faq(question_lower)
                 if faq_results:
@@ -394,9 +324,7 @@ class Assistant(Agent):
                 logger.warning(f"KB search failed: {e}")
 
             # Create help request with context
-            room_name = None
-            if self.job_context and hasattr(self.job_context, 'room') and self.job_context.room:
-                room_name = self.job_context.room.name
+            room_name = request.room_name
 
             customer_context = {
                 "timestamp": datetime.now().isoformat(),
@@ -412,11 +340,11 @@ class Assistant(Agent):
                 "previous_queries": context.userdata.previous_queries[-3:] if context.userdata.previous_queries else []
             }
 
-            request_id = await self.help_manager.create_help_request(
-                reason=question,
-                room_name=room_name,
-                customer_context=customer_context
+            payload = HelpRequestCreate(
+                question=question,
+                room_name=room_name
             )
+            request_id = await self.help_manager.create_help_request(payload)
 
             logger.info(f"Help request created: {request_id}")
             context.userdata.last_tool_result = f"help_requested:{request_id}"

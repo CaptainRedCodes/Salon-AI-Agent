@@ -1,4 +1,3 @@
-
 from dotenv import load_dotenv
 from livekit.agents import (
     JobContext,
@@ -12,6 +11,8 @@ from livekit.plugins import silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 import logging
 import asyncio
+
+from app.config.settings import settings
 
 from .agent import Assistant, SalonUserData
 
@@ -41,9 +42,9 @@ async def entrypoint(ctx: JobContext):
         }
         
         session = AgentSession(
-            stt="assemblyai/universal-streaming:en",
-            llm="google/gemini-2.0-flash",
-            tts="cartesia",
+            stt=settings.stt,
+            llm=settings.llm,
+            tts=settings.tts,
             turn_detection=MultilingualModel(),                       
             vad=ctx.proc.userdata["vad"],
             preemptive_generation=True

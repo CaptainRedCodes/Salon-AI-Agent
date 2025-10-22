@@ -1,10 +1,11 @@
-# Configure logging
 import asyncio
 from datetime import datetime, timezone
 import logging
-from typing import Any, Dict, List
+from typing import List
 
+from app.config.settings import booking_settings
 from app.db import FirebaseManager
+from app.models.booking import BookingCreate, BookingView
 
 
 logging.basicConfig(
@@ -20,17 +21,9 @@ class BookingManager:
     def __init__(self):
         self.firebase = FirebaseManager()
         self.db = self.firebase.get_firestore_client()
-        self.collection_name = "appointments"
+        self.collection_name = booking_settings.collection_name
     
-    async def create_booking(
-        self,
-        customer_name: str,
-        service: str,
-        appointment_date: str,
-        appointment_time: str,
-        price: float,
-        phone_number: str = ""
-    ) -> Dict[str, Any]:
+    async def create_booking(self, booking_data: BookingCreate) -> BookingView:
         """Create a new appointment booking."""
         try:
             timestamp = datetime.now(timezone.utc)
@@ -40,38 +33,32 @@ class BookingManager:
                 timestamp_part = int(timestamp.timestamp() * 1000) % 100000
                 confirmation_number = f"SA{timestamp_part}"
                 
-                booking = {
+                booking_dict = booking_data.model_dump()
+                booking_dict.update({
                     "confirmation_number": confirmation_number,
-                    "customer_name": customer_name,
-                    "service": service,
-                    "appointment_date": appointment_date,
-                    "appointment_time": appointment_time,
-                    "phone_number": phone_number,
-                    "price": price,
                     "status": "confirmed",
                     "created_at": timestamp,
                     "updated_at": timestamp,
                     "cancelled": False,
                     "cancellation_reason": None
-                }
+                })
                 
                 doc_ref = self.db.collection(self.collection_name).document()
-                doc_ref.set(booking)
-                
-                booking["id"] = doc_ref.id
-                logger.info(f"Booking created: {confirmation_number} for {customer_name}")
-            
-                return booking
+                doc_ref.set(booking_dict)
+                booking_dict["id"] = doc_ref.id
+
+                logger.info(f"Booking created: {confirmation_number} for {booking_data.customer_name}")
+                return booking_dict
             
             booking = await loop.run_in_executor(None, _create)
             logger.info(f"Booking created: {booking['confirmation_number']} for {booking['customer_name']}")
-            return booking
+            return BookingView(**booking)
             
         except Exception as e:
             logger.error(f"Failed to create booking: {e}")
             raise
     
-    async def get_bookings_by_date(self, date: str) -> List[Dict[str, Any]]:
+    async def get_bookings_by_date(self, date: str) -> List[BookingView]:
         """Get all bookings for a specific date."""
         loop = asyncio.get_event_loop()
         
@@ -79,6 +66,6 @@ class BookingManager:
             docs = self.db.collection(self.collection_name).where(
                 "appointment_date", "==", date
             ).stream()
-            return [doc.to_dict() for doc in docs]
+            return [BookingView(**doc.to_dict()) for doc in docs]
 
         return await loop.run_in_executor(None, _query)

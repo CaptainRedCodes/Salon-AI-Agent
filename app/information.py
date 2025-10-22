@@ -220,3 +220,26 @@ INSTRUCTIONS = f"""You are a professional receptionist at Super Unisex Salon. Yo
             </critical_reminders>
 
             Remember: Your success is measured by customer satisfaction and successful bookings. Be helpful, efficient, and genuinely care about finding the best solution for each customer."""
+
+SALON_FAQ = [
+  {
+    "question": "What services do you offer?",
+    "answer": "We offer a wide range of services including haircuts, hair styling, coloring, facials."
+  },
+  {
+    "question": "Do I need to book an appointment?",
+    "answer": "Walk-ins are welcome, but we recommend booking an appointment in advance to avoid waiting time — especially on weekends."
+  },
+  {
+    "question": "How can I book an appointment?",
+    "answer": "You can book through our website, call us at +91 9999999999, or visit the salon directly."
+  },
+  {
+    "question": "What are your working hours?",
+    "answer": "We are open from 9AM to 7PM on all days except Thursday, which is a holiday."
+  },
+  {
+    "question": "Do you offer services for both men and women?",
+    "answer": "Yes! We are a unisex salon offering services for everyone."
+  }
+]
