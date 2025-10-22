@@ -50,19 +50,29 @@ class Assistant(Agent):
     @function_tool
     async def get_current_date_and_time(self,context: RunContext[SalonUserData]) -> str:
         """
-        Returns the current date and time in human-readable format for the AI agent.
+        Returns the current date, day of the week, and time in human-readable format for the AI agent.
         Updates the agent's context with last tool called and result.
         """
+        # Get current UTC time and convert to local timezone
         now = datetime.now(timezone.utc).astimezone()
-        human_readable = now.strftime("%B %d, %Y at %I:%M %p")
+        
+        day_name = now.strftime("%A")
+        date_str = now.strftime("%B %d, %Y")
+        time_str = now.strftime("%I:%M %p")
+        
+        human_readable = f"{day_name}, {date_str} at {time_str}"
         iso_format = now.isoformat()
 
         if getattr(context, "userdata", None):
             context.userdata.last_tool_called = "get_current_date_and_time"
             context.userdata.last_tool_result = {
+                "day": day_name,
+                "date": date_str,
+                "time": time_str,
                 "human_readable": human_readable,
                 "iso": iso_format
             }
+
         return f"The current date and time is {human_readable}"
 
     @function_tool
