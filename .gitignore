@@ -1,6 +1,6 @@
 .venv
 .env
 saloon-ai-agent-firebase-adminsdk-fbsvc-5d98757c45.json
-__pycache__/
+*/__pycache__/*
 *.pyc
 models/
