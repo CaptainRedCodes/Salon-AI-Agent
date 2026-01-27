@@ -1,6 +1,1 @@
-# AI Agent
-
-Assignment for FRONTDESK
-
-
-** May convert it to Standalone project Later **
+Ai Agent with Livekit. Will add human in the loop later on
