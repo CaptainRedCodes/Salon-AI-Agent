@@ -4,3 +4,5 @@ saloon-ai-agent-firebase-adminsdk-fbsvc-83d3686a85.json
 */__pycache__/*
 *.pyc
 sentence_models/
+todo
+__pycache__

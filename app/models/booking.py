@@ -2,17 +2,30 @@ from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, Field, field_validator
 
-class CollectCustomerInformationArgs(BaseModel):
-    customer_name: Optional[str] = None
-    phone_number: Optional[str] = None
 
+class CustomerDetail(BaseModel):
+    """Customer information model."""
+    customer_name: Optional[str] = Field(default=None, description="Customer's full name")
+    phone_number: Optional[str] = Field(default=None, description="Customer's 10-digit phone number")
+
+
+class CollectCustomerInformationArgs(BaseModel):
+    """Args for collect_customer_information tool."""
+    customer_name: Optional[str] = Field(
+        default=None, 
+        description="The customer's full name"
+    )
+    phone_number: Optional[str] = Field(
+        default=None, 
+        description="The customer's 10-digit phone number"
+    )
 
 class BookingCreate(BaseModel):
     customer_name: Optional[str] = None
     service: Optional[str] = None
     appointment_date: Optional[str] = None
     appointment_time: Optional[str] = None
-    price: Optional[int] = None
+    price: Optional[float] = None
     phone_number: Optional[str] = None
 
     @field_validator("phone_number")
@@ -54,6 +67,21 @@ class BookingView(BaseModel):
     updated_at: datetime
     cancelled: bool
     cancellation_reason: Optional[str]
+
+class BookingResponse(BaseModel):
+    """Response after booking is created."""
+    id: str
+    confirmation_number: str
+    customer_name: str
+    service: str
+    appointment_date: str
+    appointment_time: str
+    phone_number: str
+    price: Optional[float]
+    status: str
+    created_at: datetime
+    cancelled: bool = False
+
 
 class BookingContext(BaseModel):
     """Context for current booking in progress"""

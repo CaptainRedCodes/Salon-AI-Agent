@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 from app.models.booking import BookingContext
 
+
 class SalonUserData(BaseModel):
     """User session data with booking context tracking"""
     current_booking: BookingContext = Field(default_factory=BookingContext)
@@ -33,6 +34,8 @@ class SalonUserData(BaseModel):
         if len(self.previous_queries) > 10:
             self.previous_queries.pop(0)
 
+
 class AvailabilityCheckPayload(BaseModel):
+    """Payload for checking availability"""
     date: str = Field(..., description="Date to check, e.g., 'January 15, 2025'")
     time: Optional[str] = Field(None, description="Optional time to check, e.g., '2:00 PM'")

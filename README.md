@@ -1,6 +1,3 @@
-# AI Agent
+# Salon AI Agent 💈
 
-Assignment for FRONTDESK
-
-
-** May convert it to Standalone project Later **
+A LiveKit-powered AI voice agent for salon appointment booking with a FastAPI backend.

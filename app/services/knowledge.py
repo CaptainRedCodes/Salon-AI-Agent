@@ -1,31 +1,23 @@
-import logging
-from typing import Any, Dict, cast
+from typing import Any, Dict
 import uuid
-from dotenv import load_dotenv
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
 import os
-import json
 from itertools import islice
 
-from app.config.settings import knowledge_settings
-from app.embeddings import get_encoder
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams, PointStruct
 
-load_dotenv()
+from app.core.logging_config import get_logger
+from app.core.config import knowledge_settings, SalonDataLoader
+from app.utils.embeddings import get_encoder
+
+logger = get_logger(__name__)
 
 QDRANT_COLLECTION = knowledge_settings.collection_name
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 QDRANT_URL = os.getenv("QDRANT_URL")
 
-# FIX: control syncing from env (VERY IMPORTANT)
+# Control syncing from env
 SYNC_KB = os.getenv("SYNC_KB", "false").lower() == "true"
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
-logger = logging.getLogger(__name__)
 
 
 def batch(iterable, size=50):
@@ -35,19 +27,19 @@ def batch(iterable, size=50):
         yield chunk
 
 
-class KnowledgeManager:
+class KnowledgeService:
+    """Manages the vector knowledge base for FAQ and learned answers."""
+    
     def __init__(self):
         self.collection_name = QDRANT_COLLECTION
 
-        with open("app/json/info.json", "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        self.faq = data.get("faqs") if isinstance(data, dict) else data
+        # Load salon FAQs from centralized loader
+        self.faq = SalonDataLoader.get_faqs()
 
         self.qdrant = QdrantClient(
             url=QDRANT_URL,
             api_key=QDRANT_API_KEY,
-            timeout=60,  # FIX: increased timeout
+            timeout=60,
         )
 
         self.encoder = get_encoder()
@@ -56,7 +48,6 @@ class KnowledgeManager:
         """Initialize Qdrant collection and optionally sync FAQs."""
         self._init_collection()
 
-        # FIX: do NOT sync by default
         if SYNC_KB:
             self._sync_faqs()
         else:
@@ -121,7 +112,7 @@ class KnowledgeManager:
             logger.warning("No valid FAQs to sync")
             return
 
-        # FIX: batch upserts to avoid timeouts
+        # Batch upserts to avoid timeouts
         for i, chunk in enumerate(batch(points, size=50), start=1):
             self.qdrant.upsert(
                 collection_name=self.collection_name,
@@ -132,6 +123,7 @@ class KnowledgeManager:
         logger.info(f"FAQ sync complete ({len(points)} total)")
 
     def search(self, query: str, threshold: float = 0.7, top_k: int = 3):
+        """Search knowledge base for similar questions."""
         query_vector = self.encoder.encode(query).tolist()
 
         results = self.qdrant.query_points(
@@ -151,6 +143,7 @@ class KnowledgeManager:
         return None
 
     def add_knowledge(self, question: str, answer: str, category: str = "general"):
+        """Add a new Q&A pair to the knowledge base."""
         vector = self.encoder.encode(question).tolist()
 
         self.qdrant.upsert(
@@ -172,4 +165,5 @@ class KnowledgeManager:
         logger.info(f"Added knowledge: {question[:40]}...")
 
     def close(self):
+        """Close the Qdrant client connection."""
         self.qdrant.close()
