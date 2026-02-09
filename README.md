@@ -1,10 +1,10 @@
-# Salon AI Agent 💈
+# Salon AI Agent
 
 A sophisticated, voice-activated AI receptionist for salon appointment bookings. Built with **LiveKit**, **FastAPI**, and **Generative AI**, this agent handles real-time voice conversations to schedule appointments, answer questions, and manage customer data.
 
 ## Features
 
-- * Natural Voice Interface**: Real-time, low-latency concurrent voice conversation using LiveKit.
+- **Natural Voice Interface**: Real-time, low-latency concurrent voice conversation using LiveKit.
 - **Smart Scheduling**: Checks availability in real-time and books appointments with conflict prevention.
 - **Context Awareness**: Remembers customer details (name, phone) throughout the conversation.
 - **Robust Error Handling**: Gracefully handles invalid inputs, unavailable slots, and connection issues.
