@@ -6,3 +6,72 @@
 
 5. Make the prompt better
 
+help requests:booking_context
+(map)
+
+
+appointment_date
+null
+(null)
+
+
+appointment_time
+null
+(null)
+
+
+customer_name
+null
+(null)
+
+
+phone_number
+null
+(null)
+
+
+service
+null
+(null)
+
+
+created_at
+February 9, 2026 at 9:47:02 PM UTC+5:30
+(timestamp)
+
+
+customer_name
+"None"
+(string)
+
+
+customer_phone
+"None"
+(string)
+
+
+id
+"8b2fabfd-1282-4968-a91c-dd16d18269b7"
+(string)
+
+
+question
+"What hair care products do you use at Tony and Man Hair Salon?"
+(string)
+
+
+room_name
+"None"
+(string)
+
+
+status
+"pending"
+(string)
+
+
+updated_at
+February 9, 2026 at 9:47:02 PM UTC+5:30
+(timestamp)
+
+

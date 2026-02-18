@@ -22,9 +22,39 @@ class BookingService:
         self.collection = booking_settings.collection_name
     
     async def _run(self, func):
-        """Run sync function in executor."""
+        """
+        Run a blocking (synchronous) function in a separate thread
+        so that the FastAPI async event loop does not get blocked.
+
+        Why this is needed:
+        -------------------
+        FastAPI runs on an async event loop. The event loop must stay
+        free to handle multiple requests concurrently.
+
+        However, some operations (like Firestore queries, database calls,
+        file I/O, etc.) are synchronous and blocking. If we execute them
+        directly inside an async function, they will pause the entire
+        event loop until they finish. This reduces performance and
+        prevents other requests from being handled.
+
+        What this function does:
+        ------------------------
+        1. Gets the currently running asyncio event loop.
+        2. Submits the blocking function (`func`) to a thread pool executor.
+        3. The blocking function runs in a separate thread.
+        4. Meanwhile, the event loop remains free to handle other requests.
+        5. Once the thread completes, we await and return the result.
+
+        In simple terms:
+        ----------------
+        Instead of blocking the async server, we offload the heavy work
+        to a background worker thread and wait for the result safely.
+
+        This keeps the API fast and scalable.
+        """
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, func)
+
     
     async def create(self, data) -> BookingResponse:
         """

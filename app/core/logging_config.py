@@ -1,9 +1,3 @@
-"""
-Centralized logging configuration for the Salon AI Agent.
-
-Import this module at the top of any file that needs logging.
-This replaces scattered logging.basicConfig() calls throughout the codebase.
-"""
 import logging
 import sys
 

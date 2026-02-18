@@ -1,627 +1,621 @@
-from livekit.agents.llm import function_tool
-from datetime import datetime, timezone
+import asyncio
 import sys
+from datetime import datetime, timezone
 
-from app.core.logging_config import get_logger
+from livekit.agents import Agent, RunContext, function_tool, get_job_context
+from livekit.agents.llm import ToolError
+
 from app.core.config import SalonDataLoader
-from app.services.api_client import backend_client
+from app.core.logging_config import get_logger
 from app.models.user import SalonUserData
+from app.services.api_client import backend_client
+from app.agent.prompts import INSTRUCTIONS
 
-
-if sys.platform == 'win32':
-    import asyncio
+if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
-# centralized salon data loader
-SALON_SERVICES = SalonDataLoader.get_services()
 
 logger = get_logger(__name__)
 
 
-class Assistant:
+class Assistant(Agent):
     """
-    Voice assistant for salon appointment booking.
-    
+    Voice receptionist agent for salon appointment booking.
+
+    Inherits from livekit.agents.Agent so LiveKit can:
+    - Automatically register @function_tool methods
+    - Route RunContext / userdata properly
+    - Handle session lifecycle (on_enter, interruptions, etc.)
+
+    All persistent booking state lives in context.userdata (SalonUserData).
     All data operations go through the FastAPI backend:
-    - Bookings: POST /api/bookings
-    - Availability: GET /api/availability
-    - Help requests: POST /api/help-requests
-    - Knowledge base: GET /api/knowledge-base/search
+        - POST /api/bookings
+        - GET  /api/availability
+        - POST /api/help-requests
+        - GET  /api/knowledge-base/search
     """
-    
-    def __init__(self, session: SalonUserData, ctx):
-        """
-        Initialize assistant with user-specific context.
-        
-        Args:
-            session: User-specific data model
-            ctx: JobContext from LiveKit
-        """
-        self._ctx = ctx
-        self._userdata = session
-        
-        # Use centralized salon data loader
-        self.salon_info = {
+
+    def __init__(self) -> None:
+        super().__init__(instructions=INSTRUCTIONS)
+
+        # Salon info cached at startup — read-only, safe to share across sessions
+        self._salon = {
             "name": SalonDataLoader.get_name(),
             "address": SalonDataLoader.get_address(),
             "contact": SalonDataLoader.get_contact(),
             "working_hours": SalonDataLoader.get_working_hours(),
-            "services": SalonDataLoader.get_services()
+            "services": SalonDataLoader.get_services(),  # dict[str, float]
         }
-        
-        logger.info("Assistant initialized (using backend API)")
-    
-    @function_tool
-    async def get_current_date_and_time(
-        self,
-        format: str = "",
-    ) -> str:
-        """
-        Returns the current date, day of the week, and time in human-readable format.
-        Use this when you need to know what day or time it is.
-        
-        Args:
-            format: Optional format preference (not used, for schema compatibility)
-        
-        Returns:
-            str: Current date and time formatted for conversation
+        logger.info("Assistant initialised")
+
+    async def on_enter(self) -> None:
+        """Called by LiveKit when this agent becomes active in a session."""
+        self.session.generate_reply(
+            instructions="Greet the caller warmly and ask how you can help them today."
+        )
+
+    # ------------------------------------------------------------------ #
+    #  HELPERS                                                             #
+    # ------------------------------------------------------------------ #
+
+    def _userdata(self, context: RunContext) -> SalonUserData:
+        """Typed shortcut to session userdata."""
+        return context.userdata  # type: ignore[return-value]
+
+    # ------------------------------------------------------------------ #
+    #  TOOL: get_current_date_and_time                                     #
+    # ------------------------------------------------------------------ #
+
+    @function_tool(
+        raw_schema={
+            "name": "get_current_date_and_time",
+            "description": "Return the current date, day of week, and local time. "
+            "Call this whenever the customer says 'today', 'tomorrow', 'this Friday', "
+            "or any other relative date expression — BEFORE making availability calls. "
+            "Returns a human-readable string such as: 'Wednesday, February 18, 2026 at 10:30 AM'",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    )
+    async def get_current_date_and_time(self, context: RunContext) -> str:
+        """Return the current date, day of week, and local time.
+
+        Call this whenever the customer says 'today', 'tomorrow', 'this Friday',
+        or any other relative date expression — BEFORE making availability calls.
+
+        Returns a human-readable string such as:
+        'Wednesday, February 18, 2026 at 10:30 AM'
         """
         now = datetime.now(timezone.utc).astimezone()
-        
-        day_name = now.strftime("%A")
-        date_str = now.strftime("%B %d, %Y")
-        time_str = now.strftime("%I:%M %p")
-        
-        human_readable = f"{day_name}, {date_str} at {time_str}"
-        iso_format = now.isoformat()
-        
-        # Update context
-        self._userdata.last_tool_called = "get_current_date_and_time"
-        self._userdata.last_tool_result = {
-            "day": day_name,
-            "date": date_str,
-            "time": time_str,
-            "human_readable": human_readable,
-            "iso": iso_format,
-        }
-        
-        return f"The current date and time is {now.strftime('%A, %B %d, %Y at %I:%M %p')}"
-    
-    @function_tool
-    async def collect_customer_information(
-        self,
-        customer_name: str = "",
-        phone_number: str = "",
-    ) -> str:
-        """
-        Collect and store customer's personal information (name and phone).
-        Use this tool FIRST when starting a new booking.
-        
+        result = now.strftime("%A, %B %d, %Y at %I:%M %p")
+        logger.debug("get_current_date_and_time → %s", result)
+        return f"The current date and time is {result}"
+
+    # ------------------------------------------------------------------ #
+    #  TOOL: set_customer_name                                             #
+    # ------------------------------------------------------------------ #
+
+    @function_tool()
+    async def set_customer_name(self, context: RunContext, name: str) -> str:
+        """Store the customer's full name.
+
+        Call as soon as the customer provides their name.
+        Do NOT call if the name is already stored.
+
         Args:
-            customer_name: The customer's full name
-            phone_number: The customer's 10-digit phone number
+            name: The customer's full name (e.g. 'Priya Sharma')
         """
-        booking = self._userdata.current_booking
-        updated_fields = []
+        ud = self._userdata(context)
+        ud.current_booking.customer_name = name.strip()
+        logger.info("Stored customer name: %s", name)
+        return f"Got it, I've noted your name as {name}."
 
-        try:
-            # Update name
-            if customer_name and customer_name.lower() not in ("unknown", "none", ""):
-                booking.customer_name = customer_name.strip()
-                updated_fields.append("name")
-                logger.info(f"Stored customer name: {customer_name}")
+    # ------------------------------------------------------------------ #
+    #  TOOL: set_customer_phone                                            #
+    # ------------------------------------------------------------------ #
 
-            # Update phone
-            if phone_number:
-                clean = ''.join(filter(str.isdigit, phone_number))
-                if len(clean) != 10:
-                    return "I couldn't catch a valid 10-digit phone number. Please repeat it slowly."
-                booking.phone_number = clean
-                updated_fields.append("phone number")
-                logger.info(f"Stored phone number: {clean}")
+    @function_tool()
+    async def set_customer_phone(self, context: RunContext, phone_number: str) -> str:
+        """Store the customer's 10-digit mobile number.
 
-            self._userdata.last_tool_called = "collect_customer_information"
-            self._userdata.last_tool_result = updated_fields
+        Call as soon as the customer provides their phone number.
+        Do NOT call if a valid phone is already stored.
 
-            if updated_fields:
-                response = f"Got it! I've saved your {', '.join(updated_fields)}."
-
-                missing = []
-                if not booking.customer_name:
-                    missing.append("name")
-                if not booking.phone_number:
-                    missing.append("phone number")
-
-                if missing:
-                    response += f" I still need your {', '.join(missing)}."
-                else:
-                    response += " Now, what service would you like to book?"
-
-                return response
-
-            return "Please provide your name and phone number."
-
-        except Exception as e:
-            logger.error("Failed to collect customer info", exc_info=True)
-            return "I had trouble saving that information. Could you repeat it?"
-    
-    @function_tool
-    async def select_service(
-        self, 
-        service: str,
-    ) -> str:
-        """
-        Select a service from available salon services.
-        Use this after collecting customer information.
-        
         Args:
-            service: The name of the salon service (e.g., 'haircut', 'hair coloring')
-            
-        Returns:
-            str: Confirmation with price and next steps
+            phone_number: Raw phone input — digits only will be extracted.
+                          Must resolve to exactly 10 digits after cleaning.
         """
-        booking = self._userdata.current_booking
-        
-        try:
-            # Validate customer info exists
-            if not booking.customer_name or not booking.phone_number:
-                return "I need your name and phone number first before selecting a service."
-            
-            # Validate and set service
-            service_lower = service.lower().strip()
-            if service_lower in self.salon_info['services']:
-                booking.service = service
-                booking.price = self.salon_info['services'][service_lower]
-                
-                self._userdata.last_tool_called = "select_service"
-                self._userdata.last_tool_result = service
-                
-                logger.info(f"Service selected: {service} at ₹{booking.price}")
-                
-                return (
-                    f"Perfect! {service.title()} costs ₹{booking.price}. "
-                    "Now, when would you like to schedule your appointment? "
-                    "Please provide a date and time."
-                )
-            else:
-                available = ", ".join([s.title() for s in self.salon_info['services'].keys()])
-                return (
-                    f"I'm sorry, we don't offer '{service}'. "
-                    f"Our available services are: {available}. "
-                    "Which one would you like?"
-                )
-        
-        except Exception as e:
-            logger.error(f"Service selection failed: {e}", exc_info=True)
-            return "I had trouble with that service selection. Could you try again?"
-    
-    @function_tool
+        clean = "".join(filter(str.isdigit, phone_number))
+        if len(clean) != 10:
+            raise ToolError(
+                "The phone number is not exactly 10 digits. "
+                "Ask the customer to repeat it slowly."
+            )
+        ud = self._userdata(context)
+        ud.current_booking.phone_number = clean
+        logger.info("Stored phone: %s", clean)
+        return (
+            f"Got it. I've saved your number as {clean}. "
+            "Could you confirm that's correct?"
+        )
+
+    # ------------------------------------------------------------------ #
+    #  TOOL: select_service                                                #
+    # ------------------------------------------------------------------ #
+
+    @function_tool()
+    async def select_service(self, context: RunContext, service: str) -> str:
+        """Select and store a salon service from the available menu.
+
+        Call this as soon as the customer mentions what service they want.
+        Always announce the price after calling this tool.
+
+        Do NOT use for services not in the menu — instead tell the customer
+        what IS available.
+
+        Args:
+            service: Service name as spoken by the customer
+                     (e.g. 'haircut', 'hair coloring', 'facial')
+        """
+        ud = self._userdata(context)
+        services: dict[str, float] = self._salon["services"]
+        key = service.lower().strip()
+
+        if key not in services:
+            available = ", ".join(s.title() for s in services)
+            raise ToolError(
+                f"'{service}' is not on our menu. "
+                f"Tell the customer our services are: {available}."
+            )
+
+        ud.current_booking.service = key
+        ud.current_booking.price = services[key]
+        logger.info("Service selected: %s @ ₹%s", key, services[key])
+        return (
+            f"Service set to {key.title()} at ₹{services[key]}. "
+            "Ask the customer for their preferred date and time."
+        )
+
+    # ------------------------------------------------------------------ #
+    #  TOOL: check_availability                                            #
+    # ------------------------------------------------------------------ #
+
+    @function_tool()
     async def check_availability(
-        self, 
+        self,
+        context: RunContext,
         date: str,
         time: str = "",
     ) -> str:
-        """
-        Check available time slots for a specific date.
-        Use this when customer wants to see what times are available.
-        
+        """Check available appointment slots for a given date (and optionally a time).
+
+        ALWAYS call this BEFORE promising or scheduling any slot.
+        Never assume a slot is free without calling this first.
+
         Args:
-            date: The date to check (e.g., 'January 30, 2026', 'tomorrow')
-            time: Specific time to check, or empty string for all slots (e.g., '10:00 AM')
-            
-        Returns:
-            str: Available slots or specific time availability
+            date: Full date string, e.g. 'February 18, 2026' or
+                  'Wednesday, February 18, 2026'. Use get_current_date_and_time
+                  first if the customer used a relative expression like 'tomorrow'.
+            time: Specific time to check, e.g. '10:00 AM'. Leave empty to
+                  retrieve all open slots for the day.
         """
-        time_value = time.strip() if time and time.strip() else None
-        
-        try:
-            if not date:
-                return "Please provide a date to check availability."
-            
-            # Log the check
-            self._userdata.availability_checks.append({
+        if not date:
+            raise ToolError("A date is required to check availability.")
+
+        time_value = time.strip() or None
+
+        # Run async fetch; support graceful interruption
+        task: asyncio.Task = asyncio.ensure_future(
+            backend_client.check_availability(date, time_value)
+        )
+        await context.speech_handle.wait_if_not_interrupted([task])
+
+        if context.speech_handle.interrupted:
+            task.cancel()
+            return None  # Tool silently cancelled; LLM will re-engage
+
+        result = await task
+
+        if not result.get("success"):
+            raise ToolError(
+                "Availability service is unreachable. "
+                "Ask the customer to try a different date or time."
+            )
+
+        ud = self._userdata(context)
+        ud.availability_checks.append(
+            {
                 "date": date,
                 "time": time_value or "all",
-                "timestamp": datetime.now().isoformat()
-            })
-            self._userdata.last_tool_called = "check_availability"
-            
-            result = await backend_client.check_availability(date, time_value)
-            
-            if not result["success"]:
-                return "I'm having trouble checking availability. Please try again."
-            
-            # Store result
-            self._userdata.last_tool_result = result
-            logger.info(f"Availability checked for {date} {time_value or 'all slots'}")
-            
-            # Format response
-            if time_value:
-                if result.get("available"):
-                    return f"Great news! {time_value} on {date} is available. Would you like to book it?"
-                else:
-                    alt_slots = result.get("available_slots", [])
-                    if alt_slots:
-                        slots_str = ", ".join(alt_slots[:3]) 
-                        return f"Sorry, {time_value} on {date} is fully booked. Available times: {slots_str}. Would any of these work?"
-                    else:
-                        return f"Sorry, {date} is fully booked. Would you like to try another date?"
-            else:
-                available_slots = result.get("available_slots", [])
-                if available_slots:
-                    slots_str = ", ".join(available_slots)
-                    return f"Available times on {date}: {slots_str}. Which one works for you?"
-                else:
-                    return f"Sorry, {date} is fully booked. Would you like to try another date?"
-            
-        except Exception as e:
-            logger.error(f"Availability check failed: {e}", exc_info=True)
-            return "I'm having trouble checking availability right now. Please try again."
-        
-    @function_tool
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
+        logger.info("Availability checked: %s %s", date, time_value or "all")
+
+        if time_value:
+            if result.get("available"):
+                return f"{time_value} on {date} is available. Proceed to schedule_appointment."
+            alt = result.get("available_slots", [])
+            if alt:
+                return (
+                    f"{time_value} on {date} is taken. "
+                    f"Available slots: {', '.join(alt[:3])}. "
+                    "Offer these alternatives to the customer."
+                )
+            return f"{date} is fully booked. Ask the customer to suggest another date."
+        else:
+            slots = result.get("available_slots", [])
+            if slots:
+                return (
+                    f"Available times on {date}: {', '.join(slots)}. "
+                    "Ask the customer which slot they prefer."
+                )
+            return f"{date} is fully booked. Ask the customer for another date."
+
+    # ------------------------------------------------------------------ #
+    #  TOOL: schedule_appointment                                          #
+    # ------------------------------------------------------------------ #
+
+    @function_tool()
     async def schedule_appointment(
-        self, 
+        self,
+        context: RunContext,
         appointment_date: str,
         appointment_time: str,
     ) -> str:
-        """
-        Schedule the appointment with a specific date and time.
-        Use this after customer info and service are collected.
-        
+        """Lock in the appointment date and time after availability is confirmed.
+
+        ONLY call this after check_availability has confirmed the slot is open.
+        Prerequisites: customer name, phone, and service must already be stored.
+
         Args:
-            appointment_date: The date for the appointment (e.g., 'January 30, 2026')
-            appointment_time: The time slot (e.g., '10:00 AM')
-            
-        Returns:
-            str: Confirmation or availability status
+            appointment_date: Full date string, e.g. 'February 18, 2026'
+            appointment_time: Time in AM/PM format, e.g. '10:00 AM'
         """
-        booking = self._userdata.current_booking
-        try:
-            # Validate prerequisites
-            if not booking.customer_name or not booking.phone_number:
-                return "I need your name and phone number first."
-            
-            if not booking.service:
-                return "Please select a service before scheduling a time."
-            
-            # Check availability via backend
-            result = await backend_client.check_availability(appointment_date, appointment_time)
-            
-            if not result["success"]:
-                return "I'm having trouble checking availability. Let me try again."
-            
-            if not result.get("available", False):
-                return (
-                    f"Sorry, {appointment_time} on {appointment_date} is not available. "
-                    "Would you like to check available slots for that date?"
-                )
-            
-            # Store the appointment details
-            booking.appointment_date = appointment_date
-            booking.appointment_time = appointment_time
-            
-            self._userdata.last_tool_called = "schedule_appointment"
-            self._userdata.last_tool_result = {
-                "date": appointment_date,
-                "time": appointment_time
-            }
-            
-            logger.info(f"Appointment scheduled: {appointment_date} at {appointment_time}")
-            
-            # Move to confirmation state
-            self._userdata.conversation_state = "ready_for_confirmation"
-            
-            return (
-                f"Great! I've scheduled your {booking.service} for {appointment_date} "
-                f"at {appointment_time}. Let me summarize everything for confirmation."
+        ud = self._userdata(context)
+        booking = ud.current_booking
+
+        if not booking.customer_name or not booking.phone_number:
+            raise ToolError(
+                "Customer name or phone is missing. "
+                "Collect that information before scheduling."
             )
-        
-        except Exception as e:
-            logger.error(f"Scheduling failed: {e}", exc_info=True)
-            return "I had trouble scheduling that. Could you try again?"
-    
-    @function_tool
+        if not booking.service:
+            raise ToolError(
+                "No service selected yet. Ask the customer which service they want first."
+            )
+
+        # Re-verify availability to catch race conditions
+        result = await backend_client.check_availability(
+            appointment_date, appointment_time
+        )
+        if not result.get("success"):
+            raise ToolError(
+                "Could not verify availability. Ask the customer to try again."
+            )
+        if not result.get("available"):
+            raise ToolError(
+                f"{appointment_time} on {appointment_date} is no longer available. "
+                "Offer the customer alternative slots."
+            )
+
+        booking.appointment_date = appointment_date
+        booking.appointment_time = appointment_time
+        ud.conversation_state = "ready_for_confirmation"
+        logger.info("Appointment set: %s @ %s", appointment_date, appointment_time)
+
+        return (
+            f"Appointment saved for {booking.service.title()} on "
+            f"{appointment_date} at {appointment_time}. "
+            "Now call get_booking_summary to read the details back to the customer."
+        )
+
+    # ------------------------------------------------------------------ #
+    #  TOOL: get_booking_summary                                           #
+    # ------------------------------------------------------------------ #
+
+    @function_tool()
     async def get_booking_summary(
         self,
-        include_price: str = "true",
+        context: RunContext,
+        include_price: bool = True,
     ) -> str:
-        """
-        Get a complete summary of the current booking for customer confirmation.
-        Use this after all booking details are collected and before final confirmation.
-        
+        """Return a complete, formatted booking summary for the customer to review.
+
+        Call this AFTER all booking details are collected and BEFORE calling
+        confirm_booking. It is mandatory — never skip this step.
+
         Args:
-            include_price: Whether to show price in summary (default: True)
-        
-        Returns:
-            str: Formatted booking summary with all details
+            include_price: Whether to include the service price in the summary.
         """
-        booking = self._userdata.current_booking
-        self._userdata.last_tool_called = "get_booking_summary"
-        show_price = include_price.lower() in ["true", "yes", "1"]
-        
-        if not booking.is_complete():
-            missing = []
-            if not booking.customer_name:
-                missing.append("name")
-            if not booking.phone_number:
-                missing.append("phone number")
-            if not booking.service:
-                missing.append("service")
-            if not booking.appointment_date:
-                missing.append("date")
-            if not booking.appointment_time:
-                missing.append("time")
-            
-            return f"The booking is incomplete. I still need: {', '.join(missing)}"
-        if show_price and booking.price:
-            service_line = f"• Service: \n{booking.service} (₹{booking.price})\n"
-        else:
-            service_line = f"• Service: \n{booking.service}\n"
-        summary = (
-            f"Let me confirm your booking details:\n"
-            f"• Name: \n{booking.customer_name}\n"
-            f"• Phone: \n{booking.phone_number}\n"
-            f"\n{service_line}\n"
-            f"• Date: \n{booking.appointment_date}\n"
-            f"• Time: \n{booking.appointment_time}\n\n"
-            f"Is everything correct? Say 'yes' to confirm or tell me what needs to be changed."
+        ud = self._userdata(context)
+        booking = ud.current_booking
+
+        missing = []
+        if not booking.customer_name:
+            missing.append("name")
+        if not booking.phone_number:
+            missing.append("phone number")
+        if not booking.service:
+            missing.append("service")
+        if not booking.appointment_date:
+            missing.append("appointment date")
+        if not booking.appointment_time:
+            missing.append("appointment time")
+
+        if missing:
+            raise ToolError(
+                f"Booking is incomplete. Still missing: {', '.join(missing)}. "
+                "Collect these before showing the summary."
+            )
+
+        service_line = (
+            f"{booking.service.title()} (₹{booking.price})"
+            if include_price and booking.price
+            else booking.service.title()
         )
-        
-        self._userdata.waiting_for_confirmation = True
-        logger.info("Booking summary generated, waiting for confirmation")
-        
+
+        summary = (
+            f"Here are the booking details:\n"
+            f"Name: {booking.customer_name}\n"
+            f"Phone: {booking.phone_number}\n"
+            f"Service: {service_line}\n"
+            f"Date: {booking.appointment_date}\n"
+            f"Time: {booking.appointment_time}\n\n"
+            f"Read these back to the customer and ask: "
+            f"'Does everything look correct?'"
+        )
+
+        ud.waiting_for_confirmation = True
+        logger.info("Booking summary generated — waiting for customer confirmation")
         return summary
-    
-    @function_tool
+
+    # ------------------------------------------------------------------ #
+    #  TOOL: confirm_booking                                               #
+    # ------------------------------------------------------------------ #
+
+    @function_tool()
     async def confirm_booking(
         self,
-        confirmed: str = "true",
+        context: RunContext,
+        customer_confirmed: bool = True,
     ) -> str:
-        """
-        Finalize and confirm the booking after customer approval.
-        ONLY use this after getting explicit customer confirmation (e.g., "yes", "correct", "confirm").
-        
-        This calls the FastAPI backend to create the booking with conflict prevention.
-        
+        """Finalise and submit the booking to the backend.
+
+        ONLY call this after the customer has explicitly said 'yes', 'confirm',
+        'that's right', or an equivalent approval.
+        NEVER call this speculatively or before showing the booking summary.
+
+        Interruptions are disabled because the booking cannot be undone once submitted.
+
         Args:
-            confirmed: Confirmation flag (default: True)
-        
-        Returns:
-            str: Final confirmation with booking number
+            customer_confirmed: Set to True when the customer has given explicit approval.
+                                 Never call with False — simply don't call the tool instead.
         """
-        booking = self._userdata.current_booking
-        is_confirmed = confirmed.lower() in ["true", "yes", "1"]
-        
-        if not is_confirmed:
-            return "Okay, let me know what you'd like to change."
-        # Validate completeness
+        if not customer_confirmed:
+            return "Understood. Let me know what you'd like to change."
+
+        context.disallow_interruptions()
+
+        ud = self._userdata(context)
+        booking = ud.current_booking
+
+        if not ud.waiting_for_confirmation:
+            raise ToolError(
+                "The booking summary has not been shown yet. "
+                "Call get_booking_summary first, then wait for the customer to approve."
+            )
+
         if not booking.is_complete():
-            return "Cannot confirm - booking information is incomplete. Let me know what's missing."
-        
-        if not self._userdata.waiting_for_confirmation:
-            return "Please let me show you the booking summary first so you can review it."
-        
-        try:
-            result = await backend_client.create_booking(
-                customer_name=str(booking.customer_name),
-                phone_number=str(booking.phone_number),
-                service=str(booking.service),
-                appointment_date=str(booking.appointment_date),
-                appointment_time=str(booking.appointment_time),
-                price=float(booking.price) if booking.price else 0.0,
+            raise ToolError(
+                "Booking is incomplete. Cannot confirm — collect missing details first."
             )
-            
-            if not result["success"]:
-                error = result.get("error", "Unknown error")
-                
-                # Handle slot conflict
-                if "fully booked" in error.lower():
-                    return (
-                        f"I'm sorry, but {booking.appointment_time} on {booking.appointment_date} "
-                        "just became unavailable. Let me help you find another time."
-                    )
-                
-                return f"I had trouble confirming: {error}. Please try again."
-            
-            confirmation_number = result["confirmation_number"]
-            
-            # Update context
-            self._userdata.conversation_state = "completed"
-            self._userdata.last_tool_called = "confirm_booking"
-            self._userdata.last_tool_result = confirmation_number
-            booking.confirmed = True
-            
-            logger.info(f"Booking confirmed via backend: {confirmation_number}")
-            
-            response = (
-                f"Perfect! Your {booking.service} appointment is confirmed!\n"
-                f"Date: \n{booking.appointment_date}\n"
-                f"Time: \n{booking.appointment_time}\n"
-                f"Confirmation Number: \n{confirmation_number}\n\n"
-                f"We look forward to seeing you, {booking.customer_name}!\n"
-                f"If you need to make changes, please call us at {self.salon_info['contact']}."
+
+        result = await backend_client.create_booking(
+            customer_name=str(booking.customer_name),
+            phone_number=str(booking.phone_number),
+            service=str(booking.service),
+            appointment_date=str(booking.appointment_date),
+            appointment_time=str(booking.appointment_time),
+            price=float(booking.price) if booking.price else 0.0,
+        )
+
+        if not result.get("success"):
+            error = result.get("error", "")
+            if "fully booked" in error.lower():
+                raise ToolError(
+                    f"{booking.appointment_time} on {booking.appointment_date} "
+                    "just became unavailable. Apologise and help the customer pick another slot."
+                )
+            raise ToolError(
+                f"Backend error: {error}. "
+                f"Tell the customer to call {self._salon['contact']} to complete the booking."
             )
-            
-            # Reset for next booking
-            self._userdata.reset_booking()
-            
-            return response
-            
-        except Exception as e:
-            logger.error(f"Booking creation failed: {e}", exc_info=True)
-            return (
-                "I encountered an error while confirming your booking. "
-                f"Please call us directly at {self.salon_info['contact']} to complete your booking."
-            )
-    
-    @function_tool
+
+        confirmation_number = result["confirmation_number"]
+        booking.confirmed = True
+        ud.conversation_state = "completed"
+        logger.info("Booking confirmed: %s", confirmation_number)
+
+        response = (
+            f"Booking confirmed!\n"
+            f"Confirmation number: {confirmation_number}\n"
+            f"Service: {booking.service.title()}\n"
+            f"Date: {booking.appointment_date}\n"
+            f"Time: {booking.appointment_time}\n\n"
+            f"Tell the customer their confirmation number, wish them a great visit, "
+            f"and let them know they can call {self._salon['contact']} for any changes."
+        )
+
+        ud.reset_booking()
+        return response
+
+    # ------------------------------------------------------------------ #
+    #  TOOL: modify_booking_detail                                         #
+    # ------------------------------------------------------------------ #
+
+    @function_tool()
     async def modify_booking_detail(
-        self, 
+        self,
+        context: RunContext,
         field: str,
         new_value: str,
     ) -> str:
-        """
-        Modify a specific detail in the current booking before confirmation.
-        Use this when customer wants to change something they already provided.
-        
+        """Change a single field in the current booking before confirmation.
+
+        Use this when the customer wants to correct something they already provided.
+        After modifying, call get_booking_summary again to present updated details.
+
         Args:
-            field: The booking field to modify (name, phone, service, date, or time)
-            new_value: The new value for that field
-            
-        Returns:
-            str: Confirmation of the change
+            field: One of: 'name', 'phone', 'service', 'date', 'time'
+            new_value: The replacement value for that field
         """
-        booking = self._userdata.current_booking
-        field_lower = field.lower()
-        
-        try:
-            if field_lower in ["name", "customer_name"]:
-                booking.customer_name = new_value.strip()
-                return f"Updated your name to {new_value}. Anything else to change?"
-            
-            elif field_lower in ["phone", "phone_number"]:
-                clean_phone = ''.join(filter(str.isdigit, new_value))
-                if len(clean_phone) >= 10:
-                    booking.phone_number = clean_phone[-10:]
-                    return f"Updated your phone number. Anything else?"
-                else:
-                    return "Please provide a valid 10-digit phone number."
-            
-            elif field_lower == "service":
-                return await self.select_service(service=new_value)
-            
-            elif field_lower == "date":
-                booking.appointment_date = new_value
-                return f"Updated appointment date to {new_value}. Anything else?"
-            
-            elif field_lower == "time":
-                booking.appointment_time = new_value
-                return f"Updated appointment time to {new_value}. Anything else?"
-            
-            else:
-                return f"I can modify: name, phone, service, date, or time. Which would you like to change?"
-        
-        except Exception as e:
-            logger.error(f"Modification failed: {e}", exc_info=True)
-            return "I had trouble making that change. Could you try again?"
-    
-    @function_tool
+        ud = self._userdata(context)
+        booking = ud.current_booking
+        f = field.lower().strip()
+
+        if f in ("name", "customer_name"):
+            booking.customer_name = new_value.strip()
+            return f"Name updated to {new_value}. Is there anything else to change?"
+
+        if f in ("phone", "phone_number"):
+            clean = "".join(filter(str.isdigit, new_value))
+            if len(clean) != 10:
+                raise ToolError(
+                    "The new phone number is not 10 digits. Ask the customer to repeat it."
+                )
+            booking.phone_number = clean
+            return f"Phone updated to {clean}. Is there anything else to change?"
+
+        if f == "service":
+            # Delegate to select_service for validation
+            services: dict[str, float] = self._salon["services"]
+            key = new_value.lower().strip()
+            if key not in services:
+                available = ", ".join(s.title() for s in services)
+                raise ToolError(
+                    f"'{new_value}' is not available. Our services: {available}."
+                )
+            booking.service = key
+            booking.price = services[key]
+            return (
+                f"Service updated to {key.title()} at ₹{services[key]}. "
+                "Is there anything else to change?"
+            )
+
+        if f == "date":
+            booking.appointment_date = new_value
+            return f"Date updated to {new_value}. Is there anything else to change?"
+
+        if f == "time":
+            booking.appointment_time = new_value
+            return f"Time updated to {new_value}. Is there anything else to change?"
+
+        raise ToolError(
+            "I can only modify: name, phone, service, date, or time. "
+            "Which field does the customer want to change?"
+        )
+
+    # ------------------------------------------------------------------ #
+    #  TOOL: get_salon_information                                         #
+    # ------------------------------------------------------------------ #
+
+    @function_tool()
     async def get_salon_information(
         self,
+        context: RunContext,
         info_type: str = "all",
     ) -> str:
-        """
-        Get information about the salon (services, hours, contact, location).
-        
+        """Retrieve salon details to answer customer questions.
+
+        Use only for questions you cannot answer from the prompt directly.
+        Valid info_type values: 'services', 'hours', 'contact', 'location', 'all'
+
         Args:
-            info_type: Type of info to retrieve (services, hours, contact, location, or all)
-            
-        Returns:
-            str: Requested salon information
+            info_type: The category of information requested.
         """
-        info_type_lower = info_type.lower().strip()
-        
-        try:
-            if info_type_lower == "services":
-                services_list = [
-                    f"• {service.title()}: ₹{price}"
-                    for service, price in self.salon_info['services'].items()
-                ]
-                return f"Our services:\n" + "\n".join(services_list)
-            
-            elif info_type_lower == "hours":
-                return f"We're open {self.salon_info['working_hours']}"
-            
-            elif info_type_lower == "contact":
-                return f"You can reach us at {self.salon_info['contact']}"
-            
-            elif info_type_lower == "location":
-                return f"We're located at {self.salon_info['address']}"
-            
-            else:  # "all"
-                services_list = ", ".join([s.title() for s in self.salon_info['services'].keys()])
-                return (
-                    f"{self.salon_info['name']}\n"
-                    f"Location: {self.salon_info['address']}\n"
-                    f"Phone: {self.salon_info['contact']}\n"
-                    f"Hours: {self.salon_info['working_hours']}\n"
-                    f"Services: {services_list}"
-                )
-        
-        except Exception as e:
-            logger.error(f"Error getting salon info: {e}", exc_info=True)
-            return "I'm having trouble retrieving that information right now."
-    
-    @function_tool
-    async def request_help(
-        self, 
-        question: str,
-    ) -> str:
-        """
-        Answer customer questions using knowledge base or escalate to supervisor.
-        
+        s = self._salon
+        t = info_type.lower().strip()
+
+        if t == "services":
+            lines = "\n".join(
+                f"- {svc.title()}: ₹{price}" for svc, price in s["services"].items()
+            )
+            return f"Our services:\n{lines}"
+
+        if t == "hours":
+            return f"We are open {s['working_hours']} (closed every Thursday)."
+
+        if t == "contact":
+            return f"Customers can reach us at {s['contact']}."
+
+        if t == "location":
+            return f"We are located at {s['address']}."
+
+        # "all"
+        services_line = ", ".join(svc.title() for svc in s["services"])
+        return (
+            f"{s['name']}\n"
+            f"Location: {s['address']}\n"
+            f"Phone: {s['contact']}\n"
+            f"Hours: {s['working_hours']} (closed Thursdays)\n"
+            f"Services: {services_line}"
+        )
+
+    # ------------------------------------------------------------------ #
+    #  TOOL: request_help                                                  #
+    # ------------------------------------------------------------------ #
+
+    @function_tool()
+    async def request_help(self, context: RunContext, question: str) -> str:
+        """Answer complex customer questions via knowledge base or supervisor escalation.
+
+        Use ONLY for questions you genuinely cannot answer (e.g. group discounts,
+        cancellation policy for special cases, accessibility queries).
+        NEVER use for: greetings, basic service/price info, availability, or bookings.
+
         Flow:
-        1. First searches knowledge base via backend API
-        2. If no answer found, creates help request for supervisor
-        3. Supervisor sees request in dashboard with customer context
-        
+          1. Searches the knowledge base (threshold 0.7)
+          2. If no answer found → creates a supervisor help request
+
         Args:
-            question: The customer's question that needs assistance
-            
-        Returns:
-            str: Answer or confirmation of escalation
+            question: The customer's question verbatim or closely paraphrased
         """
-        logger.info(f"Help requested: {question[:50]}...")
-        
-        try:
-            # Search knowledge base via backend
-            kb_result = await backend_client.search_knowledge_base(question, threshold=0.7)
-            
-            if kb_result["success"] and kb_result.get("found"):
-                logger.info("Answered from knowledge base")
-                self._userdata.last_tool_called = "request_help"
-                self._userdata.last_tool_result = "kb_found"
-                return kb_result["answer"]
-            
-            # Escalate to supervisor via backend
-            logger.info("Escalating to supervisor")
-            
-            # Get customer context
-            booking = self._userdata.current_booking
-            booking_context = None
-            if booking:
-                booking_context = {
-                    "customer_name": booking.customer_name,
-                    "phone_number": booking.phone_number,
-                    "service": booking.service,
-                    "appointment_date": booking.appointment_date,
-                    "appointment_time": booking.appointment_time,
-                }
-            
-            # Create help request via backend
-            result = await backend_client.create_help_request(
-                question=question,
-                customer_name=str(booking.customer_name if booking else "unknown"),
-                customer_phone=str(booking.phone_number if booking else "unknown"),
-                booking_context=booking_context or {},
-                room_name=str(getattr(self._ctx, 'room_name', None)),
-            )
-            
-            self._userdata.last_tool_called = "request_help"
-            self._userdata.last_tool_result = {
-                "status": "supervisor_notified",
-                "request_id": result.get("request_id"),
+        logger.info("request_help: %s", question[:80])
+        ud = self._userdata(context)
+        booking = ud.current_booking
+
+        # 1. Knowledge base lookup
+        kb = await backend_client.search_knowledge_base(question, threshold=0.7)
+        if kb.get("success") and kb.get("found"):
+            logger.info("Answered from knowledge base")
+            return kb["answer"]
+
+        # 2. Escalate — build context payload
+        booking_ctx = {}
+        if booking:
+            booking_ctx = {
+                "customer_name": booking.customer_name,
+                "phone_number": booking.phone_number,
+                "service": booking.service,
+                "appointment_date": booking.appointment_date,
+                "appointment_time": booking.appointment_time,
             }
-            
-            return (
-                "That's a great question! Let me check with my supervisor and get back to you. "
-                "I've sent them all your details. They'll reach out to you shortly. "
-                "In the meantime, is there anything else I can help with?"
-            )
-            
-        except Exception as e:
-            logger.error(f"Error in request_help: {e}", exc_info=True)
-            return (
-                "I'm having trouble right now. "
-                f"Please call us directly at {self.salon_info['contact']} for assistance."
-            )
+
+        try:
+            room_name = get_job_context().room.name
+        except Exception:
+            room_name = None
+
+        result = await backend_client.create_help_request(
+            question=question,
+            customer_name=str(booking.customer_name or "unknown"),
+            customer_phone=str(booking.phone_number or "unknown"),
+            booking_context=booking_ctx,
+            room_name=room_name,
+        )
+
+        logger.info("Help request created: %s", result.get("request_id", "unknown"))
+
+        return (
+            "That's a great question — I've flagged it for my supervisor who will follow up "
+            "with you shortly. Is there anything else I can help you with in the meantime?"
+        )
